@@ -1,9 +1,1 @@
-[
-null,
-{"id":1,"expanded":false,"name":"01 교실","order":1,"parentId":0,"scrollX":3931.2,"scrollY":2212.7999999999997},
-{"id":2,"expanded":false,"name":"02 한반도와 동해","order":2,"parentId":0,"scrollX":600,"scrollY":400},
-{"id":3,"expanded":false,"name":"03 울릉도","order":3,"parentId":0,"scrollX":600,"scrollY":400},
-{"id":4,"expanded":false,"name":"04 독도전망대","order":4,"parentId":0,"scrollX":600,"scrollY":400},
-{"id":5,"expanded":false,"name":"05 추격 바다(1696)","order":5,"parentId":0,"scrollX":600,"scrollY":400},
-{"id":6,"expanded":false,"name":"06 독도","order":6,"parentId":0,"scrollX":600,"scrollY":400}
-]
+[null, {"id": 1, "expanded": false, "name": "01 교실", "order": 1, "parentId": 0, "scrollX": 600, "scrollY": 400}, {"id": 2, "expanded": false, "name": "02 한반도와 동해", "order": 2, "parentId": 0, "scrollX": 600, "scrollY": 400}, {"id": 3, "expanded": false, "name": "03 울릉도", "order": 3, "parentId": 0, "scrollX": 600, "scrollY": 400}, {"id": 4, "expanded": false, "name": "04 독도전망대", "order": 4, "parentId": 0, "scrollX": 600, "scrollY": 400}, {"id": 5, "expanded": false, "name": "05 추격 바다(1696)", "order": 5, "parentId": 0, "scrollX": 600, "scrollY": 400}, {"id": 6, "expanded": false, "name": "06 독도", "order": 6, "parentId": 0, "scrollX": 600, "scrollY": 400}]

@@ -1,6 +1,6 @@
 //=============================================================================
 // EscapeRoom.js  (RPG Maker MV)
-// 걸어 다니며 조사하는 방탈출 엔진 v3.1 (어드벤처 · 전체 화면)
+// 걸어 다니며 조사하는 방탈출 엔진 v3.2 (어드벤처 · 잠행 · 미션 · 타이밍)
 //=============================================================================
 /*:
  * @plugindesc 걸어 다니며 조사하는 방탈출 엔진 - 이벤트 이름과 데이터 파일 하나로 단서, 자물쇠, 퀴즈를 만듭니다.
@@ -148,10 +148,26 @@
  *  - 타이틀 화면을 누르는 순간 브라우저 주소창까지 숨기는 전체 화면이 됩니다.
  *    (컴퓨터·안드로이드. 아이폰은 브라우저가 막아 둠. ESC를 누르면 전체 화면이 풀림)
  *  - 끄려면 플러그인 설정 "시작할 때 전체 화면"을 [끄기]로.
+ *
+ *  - 인트로 영상은 기본으로 건너뛸 수 없음. 건너뛰게 하려면 데이터에 "movieSkip": true
+ *    (또는 단계 { "movie": "이름", "skip": true }). 영상 파일이 고장 나 멈추면 자동으로 넘어감.
+ *
+ *  v3.2 잠행 · 미션 · 타이밍 · 퀴즈 힌트
+ *  - 감시(잠행): 방에 "watchers": [{ "event": "순사1", "route": [[x,y],[x,y]], "sight": 4 }]
+ *    "watchIf": 조건, "checkpoint": [x,y,"up"], "caught": [단계...]  → 시야(빨간 칸)에 들어가면 들킴
+ *  - 미션: { "mission": { "targets": [이벤트 이름...], "time": 60, "label": "...", "success": [], "fail": [] } }
+ *    제한 시간 안에 대상에게 모두 말을 걸면(결정키) 성공
+ *  - 타이밍: { "timing": { "goal": 10, "maxMiss": 3, "speed": 1.6, "zone": 0.22, "label": "등사기 인쇄",
+ *    "per": 100, "unit": "장", "success": [], "fail": [] } }
+ *  - 퀴즈 힌트: 데이터 "hintQuizzes": [{ "question": "...", "choice": [...], "answer": 1 }]
+ *    힌트를 다 쓰면 퀴즈를 맞혀 힌트 1개를 더 얻음
+ *  - 따라오는 사람들: 조사 지점에 "follow": 조건  → 조건이 맞으면 주인공을 따라 걸음
+ *  - 화면 색(밤): 방에 "tint": [-68,-68,0,68]  /  단계 { "tint": [...], "duration": 60 }
+ *  - 사료 수집: 데이터 "archives": [아이템 id...] → 기록 화면에 모은 개수 표시
  */
 
 var Imported = Imported || {};
-Imported.EscapeRoom = '3.1.0';
+Imported.EscapeRoom = '3.2.0';
 
 var $dataEscape = null;
 var EscapeManager = null;
@@ -453,6 +469,9 @@ var EscapeManager = null;
         } else if (kind === 'title') {
             url = 'img/titles1/' + encodeURIComponent(name) + '.png';
             if (Decrypter.hasEncryptedImages) url = Decrypter.extToEncryptExt(url);
+        } else if (kind === 'pic') {
+            url = 'img/pictures/' + encodeURIComponent(name) + '.png';
+            if (Decrypter.hasEncryptedImages) url = Decrypter.extToEncryptExt(url);
         } else {
             url = 'movies/' + encodeURIComponent(name) + videoExt();
         }
@@ -475,6 +494,22 @@ var EscapeManager = null;
             });
         };
         scan(d.intro);
+        // 그림(확대 그림·아이템 그림): 없으면 멈추지 않고 건너뛰기
+        var deep = function(o) {
+            if (!o || typeof o !== 'object') return;
+            if (Array.isArray(o)) { o.forEach(deep); return; }
+            Object.keys(o).forEach(function(k) {
+                var v = o[k];
+                if ((k === 'picture' || k === 'closeup') && typeof v === 'string' && v) keys['pic/' + v] = true;
+                else deep(v);
+            });
+        };
+        deep(d.intro); deep(d.rooms); deep(d.review); deep(d.ending);
+        Object.keys(d.items || {}).forEach(function(id) {
+            var it = d.items[id] || {};
+            if (it.image) keys['pic/' + it.image] = true;
+            if (it.closeup) keys['pic/' + it.closeup] = true;
+        });
         toArray(d.rooms).forEach(function(r) {
             addBgm(r.bgm);
             scan(r.enter);
@@ -525,6 +560,13 @@ var EscapeManager = null;
     function hasAsset(kind, name) {
         return !!name && EscapeAssets[kind + '/' + name] === true;
     }
+
+    // 없는 그림을 불러도 '불러오기 오류'로 멈추지 않게 빈 그림으로 바꿔 줌
+    var _ImageManager_loadPicture = ImageManager.loadPicture;
+    ImageManager.loadPicture = function(filename, hue) {
+        if (filename && EscapeAssets['pic/' + filename] === false) return new Bitmap(1, 1);
+        return _ImageManager_loadPicture.call(this, filename, hue);
+    };
 
     //=========================================================================
     // 타이틀 화면: 그림 · 게임 이름 · 음악
@@ -912,7 +954,17 @@ var EscapeManager = null;
     Window_EscMessage.prototype.lineHeight = function() { return 36; };
     Window_EscMessage.prototype.setNameWindow = function(w) { this._nameWindow = w; };
 
+    // 글 속 {이름} 바꾸기: 주인공 고르기 "vars" / 데이터 "vars"
+    function escSub(t) {
+        if (t === null || t === undefined) return t;
+        t = String(t);
+        if (t.indexOf('{') < 0 || !EscapeManager) return t;
+        var v = EscapeManager._vars || {};
+        return t.replace(/\{([^{}]+)\}/g, function(m, k) { return v[k] !== undefined ? String(v[k]) : m; });
+    }
+
     Window_EscMessage.prototype.say = function(text, speaker, callback, waitInput) {
+        text = escSub(text); speaker = escSub(speaker);
         this.resetFontSettings();
         var lines = wrapText(this.contents, text, this.contentsWidth() - 12);
         this._pages = [];
@@ -1200,6 +1252,98 @@ var EscapeManager = null;
         } else if (key) {
             this.addDigit(key);
         }
+    };
+
+    //=========================================================================
+    // Window_EscTiming - 타이밍 미니게임 (움직이는 바늘이 초록 칸에 왔을 때 누르기)
+    //=========================================================================
+    function Window_EscTiming() {
+        this.initialize.apply(this, arguments);
+    }
+    Window_EscTiming.prototype = Object.create(Window_Base.prototype);
+    Window_EscTiming.prototype.constructor = Window_EscTiming;
+    Window_EscTiming.prototype.initialize = function() {
+        var w = Math.min(600, SW() - 40), h = 228;
+        Window_Base.prototype.initialize.call(this, (SW() - w) / 2, HUD_H + 70, w, h);
+        this.openness = 0;
+        this.active = false;
+        this._handlers = {};
+    };
+    Window_EscTiming.prototype.setHandler = function(n, f) { this._handlers[n] = f; };
+    Window_EscTiming.prototype.setup = function(def) {
+        this._def = def;
+        this._goal = Number(def.goal || 10);
+        this._maxMiss = Number(def.maxMiss || 3);
+        this._speed = Number(def.speed || 1.5);
+        this._zoneW = Number(def.zone || 0.22);
+        this._ok = 0; this._miss = 0; this._t = 0; this._pos = 0; this._dir = 1;
+        this._flash = 0; this._flashOk = true; this._end = 0;
+        this.newZone();
+        this.open(); this.activate();
+        this._openFrame = Graphics.frameCount;
+        this.refresh();
+    };
+    Window_EscTiming.prototype.newZone = function() {
+        this._zone = 0.08 + Math.random() * (0.84 - this._zoneW);
+    };
+    Window_EscTiming.prototype.update = function() {
+        Window_Base.prototype.update.call(this);
+        if (!this.active || !this.isOpen()) return;
+        if (this._end > 0) {
+            if (--this._end === 0) { var ok = this._ok >= this._goal; this.active = false; if (this._handlers.done) this._handlers.done(ok); }
+            this.refresh();
+            return;
+        }
+        this._pos += this._dir * this._speed / 90;
+        if (this._pos > 1) { this._pos = 1; this._dir = -1; }
+        if (this._pos < 0) { this._pos = 0; this._dir = 1; }
+        if (this._flash > 0) this._flash--;
+        if (this._openFrame !== Graphics.frameCount && Graphics.frameCount - this._openFrame > 8 &&
+            (Input.isTriggered('ok') || TouchInput.isTriggered())) {
+            var hit = this._pos >= this._zone && this._pos <= this._zone + this._zoneW;
+            this._flash = 18; this._flashOk = hit;
+            if (hit) {
+                this._ok++;
+                if (!playSafeSe(SE_ITEM, 70, 130)) SoundManager.playCursor();
+                this.newZone();
+                this._speed *= 1.04;
+            } else {
+                this._miss++;
+                SoundManager.playBuzzer();
+                $gameScreen.startShake(4, 10, 12);
+            }
+            if (this._ok >= this._goal || this._miss > this._maxMiss) this._end = 40;
+        }
+        this.refresh();
+    };
+    Window_EscTiming.prototype.refresh = function() {
+        var c = this.contents; if (!c) return;
+        c.clear();
+        var w = this.contentsWidth(), def = this._def || {};
+        c.fontSize = 22; this.changeTextColor('#ffe9b0');
+        c.drawText(def.label || '타이밍', 0, 0, w, 32, 'center');
+        c.fontSize = 18; this.resetTextColor();
+        var per = Number(def.per || 1), unit = def.unit || '';
+        c.drawText('완성: ' + (this._ok * per) + ' / ' + (this._goal * per) + unit, 0, 34, w / 2, 26, 'left');
+        // 소리(경계) 막대
+        var mx = w / 2 + 10, mw = w / 2 - 10;
+        c.drawText('소리', mx, 34, 50, 26, 'left');
+        for (var i = 0; i < this._maxMiss + 1; i++) {
+            var bx = mx + 52 + i * ((mw - 56) / (this._maxMiss + 1));
+            c.fillRect(bx, 40, (mw - 56) / (this._maxMiss + 1) - 6, 16, i < this._miss ? '#ff6650' : 'rgba(255,255,255,0.2)');
+        }
+        // 막대
+        var bx0 = 10, by = 78, bw = w - 20, bh = 40;
+        c.fillRect(bx0, by, bw, bh, 'rgba(0,0,0,0.5)');
+        c.fillRect(bx0 + bw * this._zone, by, bw * this._zoneW, bh, 'rgba(90,220,120,0.85)');
+        var cx = bx0 + bw * this._pos;
+        c.fillRect(cx - 3, by - 8, 6, bh + 16, this._flash > 0 ? (this._flashOk ? '#9dffb0' : '#ff6650') : '#ffffff');
+        c.fontSize = 18;
+        var msg = this._end > 0 ? (this._ok >= this._goal ? '완성!' : '소리가 너무 컸다...') :
+                  (this._flash > 0 ? (this._flashOk ? '좋아!' : '덜컹! 소리가 났다') : 'Enter · 클릭 · 톡: 초록 칸에서 누르기');
+        this.changeTextColor(this._flash > 0 && !this._flashOk ? '#ff9a8a' : '#ffffff');
+        c.drawText(msg, 0, by + bh + 14, w, 28, 'center');
+        this.resetTextColor();
     };
 
     //=========================================================================
@@ -1573,6 +1717,12 @@ var EscapeManager = null;
             this._chase = null;
             this._chaseMsg = false;
             this._goal = '';
+            this._mission = null;
+            this._vars = JSON.parse(JSON.stringify((this._data && this._data.vars) || {}));
+            this._companionOverride = null;
+            this._quizIndex = 0;
+            this._caughtCount = 0;
+            this._watch = null;
             this._started = true;
         },
 
@@ -1675,6 +1825,9 @@ var EscapeManager = null;
             this._waitTransfer = false;
             this.applyCompanion();
             this.applyRoomParallax();
+            this.setupWatchers();
+            var rmT = this.currentRoom();
+            $gameScreen.startTint(rmT && rmT.tint ? toArray(rmT.tint) : [0, 0, 0, 0], 0);
             scene.escRefreshHud();
             this.reportMissingEvents();
             var firstIntro = toArray(this._data.intro)[0];
@@ -1855,6 +2008,8 @@ var EscapeManager = null;
             }
             this.updateTimer();
             if (this._chase) this.updateChase();
+            if (this._mission) this.updateMission();
+            this.updateWatchers();
             if (this._waitTransfer) return;
             if (this._waitCount > 0) {
                 this._waitCount--;
@@ -1917,9 +2072,17 @@ var EscapeManager = null;
                 if (scene && scene.escSolveFx) scene.escSolveFx();
             }
             if (s.penalty) this.applyPenalty(Number(s.penalty));
+            if (s._hintBonus) {
+                this._hintsLeft++;
+                this.refreshHud();
+                var selfH = this;
+                setTimeout(function() {}, 0);
+                this._afterQueue = (function(prev) { return function() { if (prev) prev(); selfH.onHint(); }; })(this._afterQueue);
+            }
             if (s.goal !== undefined) { this._goal = String(s.goal || ''); if (scene && scene.escRefreshGoal) scene.escRefreshGoal(); }
             if (s.boat !== undefined && !s.go) this.setBoat(!!s.boat);
             if (s.parallax) $gameMap.changeParallax(String(s.parallax), false, false, 0, 0);
+            if (s.tint) $gameScreen.startTint(toArray(s.tint), Number(s.duration || 30));
             if (s.give || s.take || s.solve || s.flag || s.unflag) { this.refreshHud(); this.applyCompanion(); }
 
             if (s.effect === 'gate') {
@@ -1948,6 +2111,14 @@ var EscapeManager = null;
             }
             if (s.chase) {
                 this.startChase(s.chase);
+                return;
+            }
+            if (s.mission) {
+                this.startMission(s.mission);
+                return;
+            }
+            if (s.timing) {
+                this.startTiming(s);
                 return;
             }
             if (s.text !== undefined) {
@@ -1996,7 +2167,8 @@ var EscapeManager = null;
             if (!hasAsset('movie', name)) return false;
             AudioManager.stopBgm();
             this._waiting = true;
-            this._movie = { frames: 0 };
+            // 기본은 건너뛰기 없음. 단계 "skip": true 또는 데이터 "movieSkip": true 일 때만 건너뛸 수 있음
+            this._movie = { frames: 0, canSkip: s.skip === true || (s.skip !== false && this._data.movieSkip === true) };
             Graphics._escVideoCancelled = false;
             if (Graphics._video) {
                 Graphics._video.style.objectFit = 'contain';
@@ -2010,7 +2182,7 @@ var EscapeManager = null;
             var m = this._movie;
             m.frames++;
             var v = Graphics._video;
-            var skip = m.frames > 20 && (Input.isTriggered('ok') || Input.isTriggered('cancel') ||
+            var skip = m.canSkip && m.frames > 20 && (Input.isTriggered('ok') || Input.isTriggered('cancel') ||
                 TouchInput.isTriggered() || TouchInput.isCancelled());
             var stalled = (m.frames > 150 && v && v.paused && !Graphics._videoLoading && v.currentTime === 0) ||
                 (m.frames > 360 && v && (v.error || v.currentTime === 0));
@@ -2177,6 +2349,194 @@ var EscapeManager = null;
             return toArray(this._data && this._data.characters);
         },
 
+        // --- 감시(잠행) ----------------------------------------------------------------
+        setupWatchers: function() {
+            var room = this.currentRoom();
+            this._watch = null;
+            if (!room || !room.watchers) return;
+            var list = [];
+            toArray(room.watchers).forEach(function(w) {
+                var ev = $gameMap.events().filter(function(e) { return String(e.event().name).trim() === String(w.event); })[0];
+                if (!ev) return;
+                ev.setMoveSpeed(Number(w.speed || 3));
+                ev.setThrough(false);
+                list.push({ def: w, ev: ev, idx: 0, wait: 0, home: [ev.x, ev.y, ev.direction()] });
+            });
+            this._watch = { list: list, cool: 0 };
+        },
+
+        watchActive: function() {
+            var room = this.currentRoom();
+            if (!this._watch || !room) return false;
+            if (room.watchIf && !this.checkCond(room.watchIf)) return false;
+            return true;
+        },
+
+        // 이벤트가 바라보는 쪽으로 퍼지는 시야 칸들
+        sightTiles: function(w) {
+            var ev = w.ev, d = ev.direction(), n = Number(w.def.sight || 4);
+            var dx = d === 6 ? 1 : d === 4 ? -1 : 0, dy = d === 2 ? 1 : d === 8 ? -1 : 0;
+            var tiles = [];
+            var blocked = function(x, y) {
+                if (!$gameMap.isValid(x, y)) return true;
+                return $gameMap.regionId(x, y) === WALL_REGION;
+            };
+            for (var k = 1; k <= n; k++) {
+                var cx = ev.x + dx * k, cy = ev.y + dy * k;
+                if (blocked(cx, cy)) break;
+                var spread = Math.min(1, Math.floor(k / 2));
+                for (var s = -spread; s <= spread; s++) {
+                    var tx = cx + (dy !== 0 ? s : 0), ty = cy + (dx !== 0 ? s : 0);
+                    if (!blocked(tx, ty)) tiles.push([tx, ty]);
+                }
+            }
+            return tiles;
+        },
+
+        updateWatchers: function() {
+            if (!this._watch || this._phase !== 'play') return;
+            var active = this.watchActive();
+            var self = this;
+            var frozen = this.isBusy() && !this._mission && !this._chase;
+            this._watch.list.forEach(function(w) {
+                if (!active || frozen || w.ev._erased || w.ev._escHidden) return;
+                if (w.ev.isMoving()) return;
+                if (w.wait > 0) { w.wait--; return; }
+                var route = toArray(w.def.route);
+                if (route.length === 0) {
+                    // 제자리에서 두리번거리기
+                    var dirs = toArray(w.def.look || [2, 4, 8, 6]);
+                    w.idx = (w.idx + 1) % dirs.length;
+                    w.ev.setDirection(Number(dirs[w.idx]));
+                    w.wait = Number(w.def.wait || 70);
+                    return;
+                }
+                var tgt = route[w.idx % route.length];
+                if (w.ev.x === tgt[0] && w.ev.y === tgt[1]) {
+                    w.idx = (w.idx + 1) % route.length;
+                    w.wait = Number(w.def.wait || 40);
+                    var nx = route[w.idx % route.length];
+                    var d0 = w.ev.findDirectionTo(nx[0], nx[1]);
+                    if (d0 > 0) w.ev.setDirection(d0);
+                    return;
+                }
+                var d = w.ev.findDirectionTo(tgt[0], tgt[1]);
+                if (d > 0) w.ev.moveStraight(d);
+            });
+            if (!active || this._watch.cool > 0) { if (this._watch.cool > 0) this._watch.cool--; return; }
+            if ((this.isBusy() && !this._mission && !this._chase) || $gamePlayer.isTransferring() || this._waitTransfer) return;
+            var px = $gamePlayer.x, py = $gamePlayer.y;
+            for (var i = 0; i < this._watch.list.length; i++) {
+                var w = this._watch.list[i];
+                if (w.ev._erased || w.ev._escHidden) continue;
+                var seen = this.sightTiles(w).some(function(t) { return t[0] === px && t[1] === py; });
+                if (seen) { this.onCaught(w); return; }
+            }
+        },
+
+        onCaught: function(w) {
+            var room = this.currentRoom();
+            this._watch.cool = 90;
+            this._caughtCount++;
+            SoundManager.playBuzzer();
+            $gameScreen.startFlash([255, 40, 40, 160], 20);
+            $gameScreen.startShake(6, 9, 18);
+            if (w && w.ev) w.ev.turnTowardPlayer();
+            if (this._mission) this._mission.caught = true;
+            var cp = toArray(room.checkpoint || room.start);
+            var steps = toArray(room.caught || [{ text: '들켰다! 처음 자리로 돌아가자.' }]).slice();
+            var again = [];
+            if (this._mission) {
+                var m = this._mission; this._mission = null;
+                if (this._scene && this._scene.escRefreshChase) this._scene.escRefreshChase();
+                this.resetMission(m);
+                steps = steps.concat(toArray(m.def.fail || []));
+                again = m.def.retry === false ? [] : [{ mission: m.def }];
+            }
+            steps.push({ go: room.id, x: Number(cp[0]), y: Number(cp[1]), dir: cp[2] || 'up' });
+            steps = steps.concat(again);
+            if (room.caughtPenalty) this.applyPenalty(Number(room.caughtPenalty));
+            if (this._chase) return;
+            this._waiting = false;
+            this._queue = steps.concat(this._queue);
+            if (!this._afterQueue) this._afterQueue = this.hideCloseup.bind(this);
+        },
+
+        // --- 미션 (제한 시간 안에 여러 사람에게 전하기) -------------------------------
+        startMission: function(def) {
+            var targets = toArray(def.targets).map(String);
+            this._mission = { def: def, targets: targets, left: targets.slice(), frames: Math.round(Number(def.time || 60) * 60) };
+            this.hideCloseup();
+            this._waiting = true;
+            $gameTemp.clearDestination();
+            if (this._scene && this._scene.escRefreshChase) this._scene.escRefreshChase();
+        },
+
+        resetMission: function(m) {
+            $gameMap.events().forEach(function(ev) {
+                if (m.targets.indexOf(String(ev.event().name).trim()) >= 0) ev._escDelivered = false;
+            });
+        },
+
+        missionTouch: function(ev) {
+            var m = this._mission;
+            if (!m) return false;
+            var n = String(ev.event().name).trim();
+            if (m.targets.indexOf(n) < 0) return false;
+            if (m.left.indexOf(n) < 0) { if (this._scene) this._scene.escShowToast('이미 전했다'); return true; }
+            m.left.splice(m.left.indexOf(n), 1);
+            ev._escDelivered = true;
+            if (ev.characterName()) ev.turnTowardPlayer();
+            var scene = this._scene;
+            if (scene) {
+                var c = { x: ev.screenX(), y: ev.screenY() - 30 };
+                scene.escBurst(c.x, c.y, 12, '255,236,150', 2);
+                scene.escShowToast(String(m.def.doneText || '전했다!') + '  ' + (m.targets.length - m.left.length) + ' / ' + m.targets.length);
+                scene.escRefreshChase();
+            }
+            if (!playSafeSe(SE_ITEM, 80, 110)) SoundManager.playOk();
+            if (m.left.length === 0) this.endMission(true);
+            return true;
+        },
+
+        updateMission: function() {
+            var m = this._mission;
+            if (!m || this._phase !== 'play') return;
+            m.frames--;
+            if (m.frames % 60 === 0 && this._scene && this._scene.escRefreshChase) this._scene.escRefreshChase();
+            if (m.frames <= 0) this.endMission(false);
+        },
+
+        endMission: function(ok) {
+            var m = this._mission;
+            this._mission = null;
+            if (this._scene && this._scene.escRefreshChase) this._scene.escRefreshChase();
+            $gameTemp.clearDestination();
+            if (ok) {
+                this.insertSteps(toArray(m.def.success));
+            } else {
+                this.resetMission(m);
+                var again = m.def.retry === false ? [] : [{ mission: m.def }];
+                this.insertSteps(toArray(m.def.fail || [{ text: '시간이 다 되었다! 다시 해 보자.' }]).concat(again));
+            }
+            this.resume();
+        },
+
+        // --- 타이밍 미니게임 -------------------------------------------------------------
+        startTiming: function(s) {
+            var self = this, scene = this._scene, def = s.timing;
+            this._waiting = true;
+            if (s.text) scene._escMsg.say(s.text, s.speaker, null, false);
+            var win = scene._escTiming;
+            win.setup(def);
+            win.setHandler('done', function(ok) {
+                win.close(); win.deactivate();
+                if (s.text) scene._escMsg.dismiss();
+                self.insertSteps(toArray(ok ? def.success : def.fail));
+                self.resume();
+            });
+        },
+
         // 방의 "parallax": [{ "if": 조건, "name": "!그림" }]  조건에 따라 원경 그림 바꾸기
         applyRoomParallax: function() {
             var room = this.currentRoom();
@@ -2199,6 +2559,8 @@ var EscapeManager = null;
         // --- 동료 (따라다니는 캐릭터) ------------------------------------------------
         applyCompanion: function(noRefresh) {
             var c = this._data && this._data.companion;
+            if (c && this._companionOverride) { var o = {}; Object.keys(c).forEach(function(k) { o[k] = c[k]; });
+                Object.keys(this._companionOverride).forEach(function(k) { o[k] = this._companionOverride[k]; }, this); c = o; }
             if (!c || !$gameParty || !$gamePlayer) return;
             var id = Number(c.actor || 2);
             if (!$dataActors[id] && $dataActors[1]) {      // 데이터베이스에 그 배우가 없으면 1번을 복사해 만듦
@@ -2349,6 +2711,11 @@ var EscapeManager = null;
             var actor = $gameParty.leader();
             if (!actor || !c || !c.image) return;
             actor.setCharacterImage(String(c.image), Number(c.index || 0));
+            var self = this;
+            if (c.flag) toArray(c.flag).forEach(function(f) { self._flags[f] = true; });
+            if (c.vars) Object.keys(c.vars).forEach(function(k) { self._vars[k] = c.vars[k]; });
+            if (c.companion) this._companionOverride = c.companion;
+            this.applyCompanion(true);
             if (c.face) actor.setFaceImage(String(c.face), Number(c.faceIndex || 0));
             $gamePlayer.refresh();
         },
@@ -2497,6 +2864,17 @@ var EscapeManager = null;
                 return;
             }
             if (this._hintsLeft <= 0) {
+                var qz = toArray(this._data.hintQuizzes);
+                if (this._quizIndex < qz.length) {
+                    var q = qz[this._quizIndex++];
+                    var self = this;
+                    this.runSteps([
+                        { speaker: '힌트', text: '힌트를 모두 썼어요. 역사 퀴즈를 맞히면 힌트를 하나 더 얻을 수 있어요!' },
+                        { speaker: '역사 퀴즈', choice: q.choice, answer: q.answer, question: q.question,
+                          success: [{ speaker: '역사 퀴즈', text: '정답! ' + (q.explain || '') + ' 힌트 1개를 얻었다.', se: '' }, { _hintBonus: true }],
+                          fail: [{ speaker: '역사 퀴즈', text: '아쉬워요! ' + (q.explain || '') }] }]);
+                    return;
+                }
                 SoundManager.playBuzzer();
                 this.runSteps([{ speaker: '힌트', text: '힌트를 모두 사용했어요. 지금까지 모은 단서를 다시 살펴보세요.' }]);
                 return;
@@ -2531,8 +2909,13 @@ var EscapeManager = null;
             if (success) {
                 steps = steps.concat(toArray(ending.success));
                 var used = Math.round(this._elapsed);
-                var record = '탈출 성공!\n걸린 시간: ' + Math.floor(used / 60) + '분 ' + (used % 60) + '초';
+                var record = (this._data.recordTitle || '탈출 성공!') + '\n걸린 시간: ' + Math.floor(used / 60) + '분 ' + (used % 60) + '초';
                 if (this._data.hints) record += '\n사용한 힌트: ' + this._hintsUsed + '개';
+                var arch = toArray(this._data.archives);
+                if (arch.length) {
+                    var self2 = this;
+                    record += '   ·   모은 사료: ' + arch.filter(function(a) { return self2.hasItem(a); }).length + ' / ' + arch.length + '장';
+                }
                 steps.push({ speaker: '기록', text: record });
             } else {
                 steps = steps.concat(toArray(ending.fail || '시간이 다 되었습니다...'));
@@ -2575,7 +2958,7 @@ var EscapeManager = null;
     //=========================================================================
     var _Game_Player_canMove = Game_Player.prototype.canMove;
     Game_Player.prototype.canMove = function() {
-        if (EscapeManager.isActive() && EscapeManager._chase && !EscapeManager._chaseMsg) return _Game_Player_canMove.call(this);
+        if (EscapeManager.isActive() && (EscapeManager._chase || EscapeManager._mission) && !EscapeManager._chaseMsg) return _Game_Player_canMove.call(this);
         if (EscapeManager.isActive() && EscapeManager.isBusy()) return false;
         return _Game_Player_canMove.call(this);
     };
@@ -2652,6 +3035,13 @@ var EscapeManager = null;
         _Game_Event_update.call(this);
         if (!EscapeManager.isActive() || this._erased) return;
         var h = EscapeManager.hotspotForEvent(this);
+        if (h && (h.follow !== undefined || h.followDelivered) && !this._escHidden && !this.isMoving() &&
+            ((h.follow !== undefined && EscapeManager.checkCond(h.follow)) || (h.followDelivered && this._escDelivered))) {
+            var ddx = Math.abs(this.x - $gamePlayer.x) + Math.abs(this.y - $gamePlayer.y);
+            this.setThrough(true);
+            this.setMoveSpeed(4);
+            if (ddx > Number(h.followGap || 2)) this.moveTowardCharacter($gamePlayer);
+        }
         if (h && h.visible !== undefined) {
             var show = EscapeManager.checkCond(h.visible);
             if (this._escHidden === undefined || this._escHidden === show) {
@@ -2676,6 +3066,7 @@ var EscapeManager = null;
 
     var _Game_Event_start = Game_Event.prototype.start;
     Game_Event.prototype.start = function() {
+        if (EscapeManager.isActive() && EscapeManager._mission && EscapeManager.missionTouch(this)) return;
         var h = EscapeManager.hotspotForEvent(this);
         if (h) {
             if (this.characterName() && !this.isDirectionFixed() && EscapeManager.canInteract()) {
@@ -2702,12 +3093,14 @@ var EscapeManager = null;
         this._escNumpad = new Window_EscNumpad();
         this._escBag = new Window_EscBag();
         this._escDial = new Window_EscDial();
+        this._escTiming = new Window_EscTiming();
         this.addWindow(this._escMsg);
         this.addWindow(this._escName);
         this.addWindow(this._escChoice);
         this.addWindow(this._escNumpad);
         this.addWindow(this._escBag);
         this.addWindow(this._escDial);
+        this.addWindow(this._escTiming);
     };
 
     Scene_Map.prototype.escCreateLayer = function() {
@@ -2781,6 +3174,10 @@ var EscapeManager = null;
 
         this._escError = new Sprite();
         add(this._escError);
+
+        // 감시 시야 (빨간 칸)
+        this._escSight = new PIXI.Graphics();
+        this._escFx.addChildAt(this._escSight, 0);
 
         // 찾아갈 곳 표시 (통통 튀는 화살표)
         this._escMarks = new Sprite();
@@ -3165,7 +3562,7 @@ var EscapeManager = null;
         if (!this._escGoal) return;
         var b = this._escGoal.bitmap;
         b.clear();
-        var g = EscapeManager._goal;
+        var g = escSub(EscapeManager._goal);
         this._escGoal.visible = !!g;
         if (!g) return;
         b.fontSize = 18;
@@ -3179,7 +3576,7 @@ var EscapeManager = null;
 
     Scene_Map.prototype.escRefreshChase = function() {
         if (!this._escChase) return;
-        var c = EscapeManager._chase;
+        var c = EscapeManager._chase || EscapeManager._mission;
         this._escChase.visible = !!c;
         if (this._escGoal) this._escGoal.visible = !c && !!EscapeManager._goal;
         if (!c) return;
@@ -3259,6 +3656,29 @@ var EscapeManager = null;
         });
     };
 
+    Scene_Map.prototype.escDrawSight = function() {
+        var g = this._escSight;
+        if (!g) return;
+        g.clear();
+        var M = EscapeManager;
+        if (!M._watch || !M.watchActive() || M._phase !== 'play') return;
+        var tw = $gameMap.tileWidth(), th = $gameMap.tileHeight();
+        var pulse = 0.22 + 0.08 * Math.sin(Graphics.frameCount / 8);
+        M._watch.list.forEach(function(w) {
+            if (w.ev._erased || w.ev._escHidden) return;
+            M.sightTiles(w).forEach(function(t) {
+                var sx = Math.round($gameMap.adjustX(t[0]) * tw), sy = Math.round($gameMap.adjustY(t[1]) * th);
+                g.beginFill(0xff3020, pulse);
+                g.drawRect(sx + 2, sy + 2, tw - 4, th - 4);
+                g.endFill();
+            });
+            // 머리 위 경계 표시
+            var ex = Math.round($gameMap.adjustX(w.ev._realX) * tw + tw / 2), ey = Math.round($gameMap.adjustY(w.ev._realY) * th - 12);
+            g.beginFill(0xffcc30, 0.95); g.drawCircle(ex, ey - 30, 7); g.endFill();
+            g.beginFill(0x402000, 1); g.drawRect(ex - 1.5, ey - 35, 3, 6); g.drawRect(ex - 1.5, ey - 27, 3, 2.5); g.endFill();
+        });
+    };
+
     // 조사 지점의 "mark": "이름" (+ "markIf": 조건) → 그 위에 통통 튀는 화살표와 이름표
     Scene_Map.prototype.escUpdateMarks = function() {
         if (!this._escMarks) return;
@@ -3306,6 +3726,7 @@ var EscapeManager = null;
         var t = Graphics.frameCount;
         var self = this;
         this.escUpdateMarks();
+        this.escDrawSight();
         // 열린 문 / 빛나는 물건
         this.escRefreshOpen();
         this._escOpenSprites.forEach(function(o) {
@@ -3519,7 +3940,7 @@ var EscapeManager = null;
     };
 
     Scene_Map.prototype.escCloseAll = function() {
-        [this._escChoice, this._escNumpad, this._escBag, this._escDial].forEach(function(w) {
+        [this._escChoice, this._escNumpad, this._escBag, this._escDial, this._escTiming].forEach(function(w) {
             if (w) {
                 w.deactivate();
                 w.close();
